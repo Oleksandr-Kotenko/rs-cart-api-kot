@@ -1,39 +1,76 @@
 import { Injectable } from '@nestjs/common';
-import { v4 } from 'uuid';
+import { v4 as uuidv4 } from 'uuid';
 
 import { Order } from '../models';
+import { InjectRepository } from '@nestjs/typeorm';
+import { OrderEntity } from '../../database/entities/order.entity';
+import { DataSource, Repository } from 'typeorm';
+import { CartStatus } from '../../enums/carts';
+import { CartEntity } from '../../database/entities/carts.entity';
 
 @Injectable()
 export class OrderService {
-  private orders: Record<string, Order> = {}
+  constructor(
+    @InjectRepository(OrderEntity)
+    private orderRepository: Repository<OrderEntity>,
+    @InjectRepository(CartEntity)
+    private cartRepository: Repository<CartEntity>,
+    private dataSource: DataSource,
+  ) {}
 
-  findById(orderId: string): Order {
-    return this.orders[ orderId ];
+  async findById(id: string): Promise<OrderEntity> {
+    return this.orderRepository.findOneBy({ id });
   }
 
-  create(data: any) {
-    const id = v4(v4())
+  async create(data: Order): Promise<OrderEntity> {
+    const id = uuidv4();
     const order = {
       ...data,
       id,
-      status: 'inProgress',
+      status: CartStatus.Open,
     };
 
-    this.orders[ id ] = order;
+    let result: OrderEntity;
+    await this.dataSource.transaction(async() => {
+      const newOrder = await this.orderRepository.create(order);
+      result = await this.orderRepository.save(newOrder);
+      await this.cartRepository.update(
+          {id: order.cartId},
+          {
+            updatedAt: new Date(),
+            status: CartStatus.Ordered,
+          },
+      );
+    });
 
-    return order;
+    return result;
   }
 
-  update(orderId, data) {
-    const order = this.findById(orderId);
+  async update(orderId: string, data): Promise<OrderEntity> {
+    try {
+      const order = await this.findById(orderId);
 
-    if (!order) {
-      throw new Error('Order does not exist.');
-    }
+      if (!order) {
+        throw new Error('Order does not exist.');
+      }
 
-    this.orders[ orderId ] = {
-      ...data,
-      id: orderId,
+      const updatedOrder = {
+        ...data,
+        id: orderId,
+      };
+
+      await this.dataSource.transaction(async () => {
+        await this.orderRepository.update({id: orderId}, updatedOrder);
+        await this.cartRepository.update(
+            {id: data.cartId},
+            {status: CartStatus.Ordered},
+        );
+      });
+
+      return updatedOrder;
+    } catch (error) {
+      console.error(`Order update error: ${JSON.stringify(error)}`);
+      throw error;
     }
   }
 }
